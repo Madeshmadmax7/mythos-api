@@ -4,6 +4,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.db.init_db import init_db
 from app.routes.story_routes import router as story_router
+from app.routes.auth_routes import router as auth_router
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -20,7 +21,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Include story routes
+# Include routers
+app.include_router(auth_router)
 app.include_router(story_router)
 
 

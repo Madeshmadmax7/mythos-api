@@ -8,10 +8,11 @@ logger = logging.getLogger(__name__)
 
 # ==================== Story (Chat) Operations ====================
 
-def create_story(db: Session, name: str, genre: str = None, description: str = None) -> Optional[Story]:
+def create_story(db: Session, user_id: int, name: str, genre: str = None, description: str = None) -> Optional[Story]:
     """Create a new story/chat."""
     try:
         story = Story(
+            user_id=user_id,
             story_name=name,
             genre=genre,
             description=description
@@ -35,10 +36,13 @@ def get_story(db: Session, story_id: int) -> Optional[Story]:
         return None
 
 
-def get_all_stories(db: Session) -> List[Story]:
-    """Get all stories ordered by most recent."""
+def get_all_stories(db: Session, user_id: int = None) -> List[Story]:
+    """Get all stories ordered by most recent. Optionally filter by user_id."""
     try:
-        return db.query(Story).order_by(Story.updated_at.desc()).all()
+        query = db.query(Story)
+        if user_id:
+            query = query.filter(Story.user_id == user_id)
+        return query.order_by(Story.updated_at.desc()).all()
     except Exception as e:
         logger.error(f"Error getting stories: {e}")
         return []

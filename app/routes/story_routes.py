@@ -6,7 +6,9 @@ from sqlalchemy.orm import Session
 
 from app.db.connection import get_db
 from app.db import crud
+from app.db.models import User
 from app.ai.hints import generate_story_with_context, refine_single_segment, generate_continuation
+from app.routes.auth_routes import get_current_user
 
 logger = logging.getLogger(__name__)
 
@@ -90,13 +92,18 @@ class EditMessageRequest(BaseModel):
 # ==================== Story (Chat) Endpoints ====================
 
 @router.post("/stories", response_model=StoryOut)
-def create_story(request: CreateStoryRequest, db: Session = Depends(get_db)):
+def create_story(
+    request: CreateStoryRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Create a new story/chat."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     
     story = crud.create_story(
         db,
+        user_id=current_user.id,
         name=request.name,
         genre=request.genre
     )
@@ -115,12 +122,15 @@ def create_story(request: CreateStoryRequest, db: Session = Depends(get_db)):
 
 
 @router.get("/stories", response_model=List[StoryOut])
-def get_stories(db: Session = Depends(get_db)):
-    """Get all stories/chats."""
+def get_stories(
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get all stories/chats for the current user."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
     
-    stories = crud.get_all_stories(db)
+    stories = crud.get_all_stories(db, user_id=current_user.id)
     result = []
     
     for story in stories:
@@ -141,7 +151,11 @@ def get_stories(db: Session = Depends(get_db)):
 
 
 @router.get("/stories/{story_id}", response_model=StoryOut)
-def get_story(story_id: int, db: Session = Depends(get_db)):
+def get_story(
+    story_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Get a single story."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -149,6 +163,10 @@ def get_story(story_id: int, db: Session = Depends(get_db)):
     story = crud.get_story(db, story_id)
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
+    
+    # Verify ownership
+    if story.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this story")
     
     messages = crud.get_messages(db, story.id)
     first_prompt = messages[0].user_prompt if messages else None
@@ -165,10 +183,22 @@ def get_story(story_id: int, db: Session = Depends(get_db)):
 
 
 @router.delete("/stories/{story_id}")
-def delete_story(story_id: int, db: Session = Depends(get_db)):
+def delete_story(
+    story_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Delete a story and all its messages."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
+    
+    story = crud.get_story(db, story_id)
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+    
+    # Verify ownership
+    if story.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to delete this story")
     
     success = crud.delete_story(db, story_id)
     if not success:
@@ -178,10 +208,23 @@ def delete_story(story_id: int, db: Session = Depends(get_db)):
 
 
 @router.put("/stories/{story_id}")
-def update_story(story_id: int, request: CreateStoryRequest, db: Session = Depends(get_db)):
+def update_story(
+    story_id: int,
+    request: CreateStoryRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Update story name/genre."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
+    
+    story = crud.get_story(db, story_id)
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+    
+    # Verify ownership
+    if story.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to update this story")
     
     story = crud.update_story(db, story_id, name=request.name, genre=request.genre)
     if not story:
@@ -193,7 +236,11 @@ def update_story(story_id: int, request: CreateStoryRequest, db: Session = Depen
 # ==================== Message Endpoints ====================
 
 @router.get("/stories/{story_id}/messages", response_model=List[MessageOut])
-def get_messages(story_id: int, db: Session = Depends(get_db)):
+def get_messages(
+    story_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """Get all messages for a story."""
     if db is None:
         raise HTTPException(status_code=503, detail="Database not available")
@@ -201,6 +248,10 @@ def get_messages(story_id: int, db: Session = Depends(get_db)):
     story = crud.get_story(db, story_id)
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
+    
+    # Verify ownership
+    if story.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this story")
     
     messages = crud.get_messages(db, story_id)
     
@@ -240,7 +291,11 @@ def edit_message(message_id: int, request: EditMessageRequest, db: Session = Dep
 
 
 @router.post("/generate", response_model=GenerateResponse)
-def generate_story_message(request: GenerateRequest, db: Session = Depends(get_db)):
+def generate_story_message(
+    request: GenerateRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """
     Generate a new story message.
     For the first message in a story, or continuation.
@@ -252,6 +307,10 @@ def generate_story_message(request: GenerateRequest, db: Session = Depends(get_d
     story = crud.get_story(db, request.story_id)
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
+    
+    # Verify ownership
+    if story.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this story")
     
     # Get existing messages and their hints for context
     existing_messages = crud.get_messages(db, request.story_id)
@@ -352,7 +411,11 @@ def refine_message(request: RefineRequest, db: Session = Depends(get_db)):
 
 
 @router.post("/continue", response_model=ContinueResponse)
-def continue_story(request: ContinueRequest, db: Session = Depends(get_db)):
+def continue_story(
+    request: ContinueRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
     """
     Continue the story with a new segment.
     Uses all previous hints to maintain context and avoid repetition.
@@ -363,6 +426,10 @@ def continue_story(request: ContinueRequest, db: Session = Depends(get_db)):
     story = crud.get_story(db, request.story_id)
     if not story:
         raise HTTPException(status_code=404, detail="Story not found")
+    
+    # Verify ownership
+    if story.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this story")
     
     # Get all existing hints for context
     existing_messages = crud.get_messages(db, request.story_id)

@@ -8,6 +8,7 @@ load_dotenv()
 
 logger = logging.getLogger(__name__)
 
+# Initialize Groq client directly (like the working example)
 client = Groq(api_key=os.getenv("LLM_API_KEY"))
 
 

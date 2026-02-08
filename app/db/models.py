@@ -6,17 +6,32 @@ from sqlalchemy.orm import relationship
 from app.db.connection import Base
 
 
+class User(Base):
+    """User account for authentication"""
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    email = Column(String(255), unique=True, nullable=False, index=True)
+    password = Column(String(255), nullable=False)  # Hashed password
+    name = Column(String(255), nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    stories = relationship("Story", back_populates="user", cascade="all, delete-orphan")
+
+
 class Story(Base):
     """A Story represents a chat/conversation - like a GPT chat session"""
     __tablename__ = "stories"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     story_name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     genre = Column(String(100), nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+    user = relationship("User", back_populates="stories")
     messages = relationship("StoryMessage", back_populates="story", cascade="all, delete-orphan", order_by="StoryMessage.order_index")
     hints = relationship("StoryHint", back_populates="story", cascade="all, delete-orphan")
 

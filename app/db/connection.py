@@ -41,9 +41,6 @@ def get_db():
     db = SessionLocal()
     try:
         yield db
-    except Exception as e:
-        logger.error(f"Database session error: {e}")
-        yield None
     finally:
         db.close()
 
