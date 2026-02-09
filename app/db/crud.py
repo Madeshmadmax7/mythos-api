@@ -1,7 +1,7 @@
 import logging
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from app.db.models import Story, StoryMessage, StoryHint
+from app.db.models import Story, StoryMessage, StoryHint, MessageReaction, MessageReview
 
 logger = logging.getLogger(__name__)
 
@@ -211,3 +211,136 @@ def get_hints_before_message(db: Session, story_id: int, message_id: int) -> Lis
     except Exception as e:
         logger.error(f"Error getting hints before message: {e}")
         return []
+
+
+# ==================== Reaction Operations ====================
+
+def set_reaction(db: Session, message_id: int, user_id: int, reaction_type: str) -> Optional[MessageReaction]:
+    """
+    Set or update a reaction for a message.
+    reaction_type should be 'like', 'dislike', or None (to remove reaction).
+    """
+    from app.db.models import MessageReaction
+    try:
+        # Check if reaction already exists
+        existing = db.query(MessageReaction).filter(
+            MessageReaction.message_id == message_id,
+            MessageReaction.user_id == user_id
+        ).first()
+        
+        if existing:
+            if reaction_type is None:
+                # Remove the reaction
+                db.delete(existing)
+                db.commit()
+                return None
+            else:
+                # Update existing reaction
+                existing.reaction_type = reaction_type
+                db.commit()
+                db.refresh(existing)
+                return existing
+        else:
+            if reaction_type is None:
+                return None
+            # Create new reaction
+            reaction = MessageReaction(
+                message_id=message_id,
+                user_id=user_id,
+                reaction_type=reaction_type
+            )
+            db.add(reaction)
+            db.commit()
+            db.refresh(reaction)
+            return reaction
+    except Exception as e:
+        logger.error(f"Error setting reaction: {e}")
+        db.rollback()
+        return None
+
+
+def get_reaction(db: Session, message_id: int, user_id: int) -> Optional[MessageReaction]:
+    """Get user's reaction for a message."""
+    from app.db.models import MessageReaction
+    try:
+        return db.query(MessageReaction).filter(
+            MessageReaction.message_id == message_id,
+            MessageReaction.user_id == user_id
+        ).first()
+    except Exception as e:
+        logger.error(f"Error getting reaction: {e}")
+        return None
+
+
+def get_reaction_counts(db: Session, message_id: int) -> dict:
+    """Get like and dislike counts for a message."""
+    from app.db.models import MessageReaction
+    try:
+        likes = db.query(MessageReaction).filter(
+            MessageReaction.message_id == message_id,
+            MessageReaction.reaction_type == 'like'
+        ).count()
+        
+        dislikes = db.query(MessageReaction).filter(
+            MessageReaction.message_id == message_id,
+            MessageReaction.reaction_type == 'dislike'
+        ).count()
+        
+        return {"likes": likes, "dislikes": dislikes}
+    except Exception as e:
+        logger.error(f"Error getting reaction counts: {e}")
+        return {"likes": 0, "dislikes": 0}
+
+
+# ==================== Review Operations ====================
+
+def create_review(db: Session, message_id: int, user_id: int, comment: str) -> Optional[MessageReview]:
+    """Create a review/comment for a message."""
+    from app.db.models import MessageReview
+    try:
+        review = MessageReview(
+            message_id=message_id,
+            user_id=user_id,
+            comment=comment
+        )
+        db.add(review)
+        db.commit()
+        db.refresh(review)
+        return review
+    except Exception as e:
+        logger.error(f"Error creating review: {e}")
+        db.rollback()
+        return None
+
+
+def get_reviews(db: Session, message_id: int) -> List[MessageReview]:
+    """Get all reviews for a message."""
+    from app.db.models import MessageReview
+    try:
+        return db.query(MessageReview).filter(
+            MessageReview.message_id == message_id
+        ).order_by(MessageReview.created_at.desc()).all()
+    except Exception as e:
+        logger.error(f"Error getting reviews: {e}")
+        return []
+
+
+def delete_review(db: Session, review_id: int, user_id: int) -> bool:
+    """Delete a review (only if owned by user)."""
+    from app.db.models import MessageReview
+    try:
+        review = db.query(MessageReview).filter(
+            MessageReview.id == review_id,
+            MessageReview.user_id == user_id
+        ).first()
+        
+        if review:
+            db.delete(review)
+            db.commit()
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error deleting review: {e}")
+        db.rollback()
+        return False
+

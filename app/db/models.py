@@ -1,5 +1,5 @@
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum, UniqueConstraint
 from sqlalchemy.dialects.mysql import LONGTEXT
 from sqlalchemy.orm import relationship
 
@@ -17,6 +17,8 @@ class User(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     stories = relationship("Story", back_populates="user", cascade="all, delete-orphan")
+    reactions = relationship("MessageReaction", back_populates="user", cascade="all, delete-orphan")
+    reviews = relationship("MessageReview", back_populates="user", cascade="all, delete-orphan")
 
 
 class Story(Base):
@@ -50,6 +52,8 @@ class StoryMessage(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     story = relationship("Story", back_populates="messages")
+    reactions = relationship("MessageReaction", back_populates="message", cascade="all, delete-orphan")
+    reviews = relationship("MessageReview", back_populates="message", cascade="all, delete-orphan")
 
 
 class StoryHint(Base):
@@ -63,3 +67,38 @@ class StoryHint(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
     story = relationship("Story", back_populates="hints")
+
+
+class MessageReaction(Base):
+    """Like/Dislike reaction for a message - one per user per message"""
+    __tablename__ = "message_reactions"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    message_id = Column(Integer, ForeignKey("story_messages.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    reaction_type = Column(Enum('like', 'dislike', name='reaction_type_enum'), nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Unique constraint: one reaction per user per message
+    __table_args__ = (
+        UniqueConstraint('message_id', 'user_id', name='unique_user_message_reaction'),
+    )
+
+    message = relationship("StoryMessage", back_populates="reactions")
+    user = relationship("User", back_populates="reactions")
+
+
+class MessageReview(Base):
+    """Review/comment for a message - multiple allowed per user per message"""
+    __tablename__ = "message_reviews"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    message_id = Column(Integer, ForeignKey("story_messages.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    comment = Column(Text, nullable=False)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    message = relationship("StoryMessage", back_populates="reviews")
+    user = relationship("User", back_populates="reviews")
+

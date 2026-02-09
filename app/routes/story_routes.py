@@ -58,7 +58,6 @@ class GenerateResponse(BaseModel):
     ai_response: str
     hint: str
 
-
 class RefineRequest(BaseModel):
     message_id: int
     refine_prompt: str
@@ -87,6 +86,33 @@ class UpdateStoryRequest(BaseModel):
 
 class EditMessageRequest(BaseModel):
     content: str
+
+
+class ReactionRequest(BaseModel):
+    reaction_type: Optional[str] = None  # 'like', 'dislike', or None to remove
+
+
+class ReactionResponse(BaseModel):
+    message_id: int
+    reaction_type: Optional[str]
+    likes: int
+    dislikes: int
+
+
+class ReviewRequest(BaseModel):
+    comment: str
+
+
+class ReviewOut(BaseModel):
+    id: int
+    message_id: int
+    user_id: int
+    user_name: str
+    comment: str
+    created_at: str
+
+    class Config:
+        from_attributes = True
 
 
 # ==================== Story (Chat) Endpoints ====================
@@ -480,3 +506,141 @@ def get_story_hints(story_id: int, db: Session = Depends(get_db)):
     
     hints = crud.get_hints(db, story_id)
     return [{"id": h.id, "hint": h.hint_text, "message_id": h.message_id} for h in hints]
+
+
+# ==================== Reaction Endpoints ====================
+
+@router.post("/messages/{message_id}/reaction", response_model=ReactionResponse)
+def set_message_reaction(
+    message_id: int,
+    request: ReactionRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Set or update reaction for a message (like/dislike/none)."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    # Validate reaction type
+    if request.reaction_type not in [None, 'like', 'dislike']:
+        raise HTTPException(status_code=400, detail="Invalid reaction type. Use 'like', 'dislike', or null")
+    
+    # Verify message exists
+    message = crud.get_message(db, message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    # Set the reaction
+    crud.set_reaction(db, message_id, current_user.id, request.reaction_type)
+    
+    # Get current counts
+    counts = crud.get_reaction_counts(db, message_id)
+    
+    return ReactionResponse(
+        message_id=message_id,
+        reaction_type=request.reaction_type,
+        likes=counts["likes"],
+        dislikes=counts["dislikes"]
+    )
+
+
+@router.get("/messages/{message_id}/reaction", response_model=ReactionResponse)
+def get_message_reaction(
+    message_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get current user's reaction and counts for a message."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    # Get user's reaction
+    reaction = crud.get_reaction(db, message_id, current_user.id)
+    reaction_type = reaction.reaction_type if reaction else None
+    
+    # Get counts
+    counts = crud.get_reaction_counts(db, message_id)
+    
+    return ReactionResponse(
+        message_id=message_id,
+        reaction_type=reaction_type,
+        likes=counts["likes"],
+        dislikes=counts["dislikes"]
+    )
+
+
+# ==================== Review Endpoints ====================
+
+@router.post("/messages/{message_id}/reviews", response_model=ReviewOut)
+def create_message_review(
+    message_id: int,
+    request: ReviewRequest,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Add a review comment to a message."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    if not request.comment.strip():
+        raise HTTPException(status_code=400, detail="Comment cannot be empty")
+    
+    # Verify message exists
+    message = crud.get_message(db, message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+    
+    review = crud.create_review(db, message_id, current_user.id, request.comment)
+    if not review:
+        raise HTTPException(status_code=500, detail="Failed to create review")
+    
+    return ReviewOut(
+        id=review.id,
+        message_id=review.message_id,
+        user_id=review.user_id,
+        user_name=current_user.name,
+        comment=review.comment,
+        created_at=review.created_at.isoformat()
+    )
+
+
+@router.get("/messages/{message_id}/reviews", response_model=List[ReviewOut])
+def get_message_reviews(
+    message_id: int,
+    db: Session = Depends(get_db)
+):
+    """Get all reviews for a message."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    reviews = crud.get_reviews(db, message_id)
+    
+    return [
+        ReviewOut(
+            id=r.id,
+            message_id=r.message_id,
+            user_id=r.user_id,
+            user_name=r.user.name if r.user else "Unknown",
+            comment=r.comment,
+            created_at=r.created_at.isoformat()
+        )
+        for r in reviews
+    ]
+
+
+@router.delete("/reviews/{review_id}")
+def delete_message_review(
+    review_id: int,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a review (only owner can delete)."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    success = crud.delete_review(db, review_id, current_user.id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Review not found or not authorized")
+    
+    return {"message": "Review deleted successfully"}
+
