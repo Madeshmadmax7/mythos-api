@@ -1,4 +1,5 @@
 import logging
+import uuid
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from app.db.models import Story, StoryMessage, StoryHint, MessageReaction, MessageReview
@@ -15,7 +16,8 @@ def create_story(db: Session, user_id: int, name: str, genre: str = None, descri
             user_id=user_id,
             story_name=name,
             genre=genre,
-            description=description
+            description=description,
+            hash_id=uuid.uuid4().hex[:12]
         )
         db.add(story)
         db.commit()
@@ -33,6 +35,15 @@ def get_story(db: Session, story_id: int) -> Optional[Story]:
         return db.query(Story).filter(Story.id == story_id).first()
     except Exception as e:
         logger.error(f"Error getting story: {e}")
+        return None
+
+
+def get_story_by_hash(db: Session, hash_id: str) -> Optional[Story]:
+    """Get a story by its hash_id."""
+    try:
+        return db.query(Story).filter(Story.hash_id == hash_id).first()
+    except Exception as e:
+        logger.error(f"Error getting story by hash: {e}")
         return None
 
 

@@ -2,7 +2,7 @@ import os
 from groq import Groq
 from dotenv import load_dotenv
 
-load_dotenv()
+load_dotenv(override=True)
 
 client = Groq(api_key=os.getenv("LLM_API_KEY"))
 

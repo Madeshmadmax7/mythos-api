@@ -24,6 +24,7 @@ class CreateStoryRequest(BaseModel):
 
 class StoryOut(BaseModel):
     id: int
+    hash_id: str
     story_name: str
     genre: Optional[str]
     created_at: str
@@ -139,6 +140,7 @@ def create_story(
     
     return StoryOut(
         id=story.id,
+        hash_id=story.hash_id,
         story_name=story.story_name,
         genre=story.genre,
         created_at=story.created_at.isoformat(),
@@ -165,6 +167,7 @@ def get_stories(
         
         result.append(StoryOut(
             id=story.id,
+            hash_id=story.hash_id,
             story_name=story.story_name,
             genre=story.genre,
             created_at=story.created_at.isoformat(),
@@ -199,6 +202,40 @@ def get_story(
     
     return StoryOut(
         id=story.id,
+        hash_id=story.hash_id,
+        story_name=story.story_name,
+        genre=story.genre,
+        created_at=story.created_at.isoformat(),
+        updated_at=story.updated_at.isoformat(),
+        message_count=len(messages),
+        first_prompt=first_prompt
+    )
+
+
+@router.get("/stories/hash/{hash_id}", response_model=StoryOut)
+def get_story_by_hash(
+    hash_id: str,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Get a single story by hash ID."""
+    if db is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    
+    story = crud.get_story_by_hash(db, hash_id)
+    if not story:
+        raise HTTPException(status_code=404, detail="Story not found")
+    
+    # Verify ownership
+    if story.user_id != current_user.id:
+        raise HTTPException(status_code=403, detail="Not authorized to access this story")
+    
+    messages = crud.get_messages(db, story.id)
+    first_prompt = messages[0].user_prompt if messages else None
+    
+    return StoryOut(
+        id=story.id,
+        hash_id=story.hash_id,
         story_name=story.story_name,
         genre=story.genre,
         created_at=story.created_at.isoformat(),

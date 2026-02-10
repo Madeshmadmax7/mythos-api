@@ -1,3 +1,4 @@
+import uuid
 from datetime import datetime
 from sqlalchemy import Column, Integer, String, Text, DateTime, ForeignKey, Enum, UniqueConstraint
 from sqlalchemy.dialects.mysql import LONGTEXT
@@ -26,6 +27,7 @@ class Story(Base):
     __tablename__ = "stories"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    hash_id = Column(String(16), unique=True, nullable=False, index=True, default=lambda: uuid.uuid4().hex[:12])
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     story_name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
