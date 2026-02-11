@@ -20,6 +20,8 @@ class User(Base):
     stories = relationship("Story", back_populates="user", cascade="all, delete-orphan")
     reactions = relationship("MessageReaction", back_populates="user", cascade="all, delete-orphan")
     reviews = relationship("MessageReview", back_populates="user", cascade="all, delete-orphan")
+    access_requests = relationship("StoryAccess", back_populates="user", cascade="all, delete-orphan")
+    change_requests = relationship("StoryChangeRequest", back_populates="user", cascade="all, delete-orphan")
 
 
 class Story(Base):
@@ -38,6 +40,8 @@ class Story(Base):
     user = relationship("User", back_populates="stories")
     messages = relationship("StoryMessage", back_populates="story", cascade="all, delete-orphan", order_by="StoryMessage.order_index")
     hints = relationship("StoryHint", back_populates="story", cascade="all, delete-orphan")
+    access_requests = relationship("StoryAccess", back_populates="story", cascade="all, delete-orphan")
+    change_requests = relationship("StoryChangeRequest", back_populates="story", cascade="all, delete-orphan")
 
 
 class StoryMessage(Base):
@@ -103,4 +107,44 @@ class MessageReview(Base):
 
     message = relationship("StoryMessage", back_populates="reviews")
     user = relationship("User", back_populates="reviews")
+
+
+class StoryAccess(Base):
+    """Tracks permission requests and status for users accessing a story"""
+    __tablename__ = "story_access"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    story_id = Column(Integer, ForeignKey("stories.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    access_type = Column(Enum('view', 'collaborate', name='access_type_enum'), nullable=False)
+    status = Column(Enum('pending', 'approved', 'rejected', name='access_status_enum'), default='pending')
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    # Constraint: One active request/access per user per story
+    __table_args__ = (
+        UniqueConstraint('story_id', 'user_id', name='unique_user_story_access'),
+    )
+
+    story = relationship("Story", back_populates="access_requests")
+    user = relationship("User", back_populates="access_requests")
+
+
+class StoryChangeRequest(Base):
+    """Tracks proposed changes by collaborators"""
+    __tablename__ = "story_change_requests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    story_id = Column(Integer, ForeignKey("stories.id"), nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    change_type = Column(Enum('new_message', 'edit', 'refine', name='change_type_enum'), nullable=False)
+    target_message_id = Column(Integer, ForeignKey("story_messages.id"), nullable=True) # Null for new_message
+    new_content = Column(LONGTEXT, nullable=False) # JSON or Text
+    status = Column(Enum('pending', 'approved', 'rejected', name='change_status_enum'), default='pending')
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    story = relationship("Story", back_populates="change_requests")
+    user = relationship("User", back_populates="change_requests")
+    target_message = relationship("StoryMessage")
 

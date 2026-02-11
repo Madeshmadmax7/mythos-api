@@ -2,7 +2,8 @@ import logging
 import uuid
 from typing import List, Optional
 from sqlalchemy.orm import Session
-from app.db.models import Story, StoryMessage, StoryHint, MessageReaction, MessageReview
+from sqlalchemy import or_, and_, desc
+from app.db.models import Story, StoryMessage, StoryHint, MessageReaction, MessageReview, StoryAccess
 
 logger = logging.getLogger(__name__)
 
@@ -48,12 +49,20 @@ def get_story_by_hash(db: Session, hash_id: str) -> Optional[Story]:
 
 
 def get_all_stories(db: Session, user_id: int = None) -> List[Story]:
-    """Get all stories ordered by most recent. Optionally filter by user_id."""
+    """Get all stories (owned + shared) ordered by most recent."""
     try:
-        query = db.query(Story)
-        if user_id:
-            query = query.filter(Story.user_id == user_id)
-        return query.order_by(Story.updated_at.desc()).all()
+        if not user_id:
+            return db.query(Story).order_by(Story.updated_at.desc()).all()
+            
+        return db.query(Story).outerjoin(StoryAccess).filter(
+            or_(
+                Story.user_id == user_id,
+                and_(
+                    StoryAccess.user_id == user_id,
+                    StoryAccess.status == 'approved'
+                )
+            )
+        ).order_by(Story.updated_at.desc()).all()
     except Exception as e:
         logger.error(f"Error getting stories: {e}")
         return []
@@ -355,3 +364,158 @@ def delete_review(db: Session, review_id: int, user_id: int) -> bool:
         db.rollback()
         return False
 
+
+# ==================== Collaboration - Access Operations ====================
+
+def create_access_request(db: Session, story_id: int, user_id: int, access_type: str) -> Optional[object]:
+    """Create a request for viewing or collaborating on a story."""
+    from app.db.models import StoryAccess
+    try:
+        # Check if exists
+        existing = db.query(StoryAccess).filter(
+            StoryAccess.story_id == story_id,
+            StoryAccess.user_id == user_id
+        ).first()
+
+        if existing:
+            # Update existing if status is not approved, or just return existing
+            if existing.status != 'approved':
+                existing.access_type = access_type
+                existing.status = 'pending'
+                db.commit()
+                db.refresh(existing)
+            return existing
+        
+        request = StoryAccess(
+            story_id=story_id,
+            user_id=user_id,
+            access_type=access_type,
+            status='pending'
+        )
+        db.add(request)
+        db.commit()
+        db.refresh(request)
+        return request
+    except Exception as e:
+        logger.error(f"Error creating access request: {e}")
+        db.rollback()
+        return None
+
+def get_story_access_requests(db: Session, story_id: int) -> List[object]:
+    """Get all access requests for a story."""
+    from app.db.models import StoryAccess
+    try:
+        return db.query(StoryAccess).filter(
+            StoryAccess.story_id == story_id
+        ).all()
+    except Exception as e:
+        logger.error(f"Error getting access requests: {e}")
+        return []
+
+def update_access_request_status(db: Session, request_id: int, status: str) -> Optional[object]:
+    """Update status of an access request (approved, rejected)."""
+    from app.db.models import StoryAccess
+    try:
+        request = db.query(StoryAccess).filter(StoryAccess.id == request_id).first()
+        if request:
+            request.status = status
+            db.commit()
+            db.refresh(request)
+        return request
+    except Exception as e:
+        logger.error(f"Error updating access request: {e}")
+        db.rollback()
+        return None
+
+def check_user_access(db: Session, story_id: int, user_id: int) -> Optional[str]:
+    """Check if user has access to story. Returns 'view', 'collaborate', or None."""
+    from app.db.models import StoryAccess, Story
+    try:
+        # Owner always has access
+        story = db.query(Story).filter(Story.id == story_id).first()
+        if story and story.user_id == user_id:
+            return 'owner'
+
+        access = db.query(StoryAccess).filter(
+            StoryAccess.story_id == story_id,
+            StoryAccess.user_id == user_id
+        ).first()
+
+        if access:
+            if access.status == 'approved':
+                return access.access_type
+            elif access.status == 'pending':
+                return 'pending'
+        return None
+    except Exception as e:
+        logger.error(f"Error checking user access: {e}")
+        return None
+
+
+# ==================== Collaboration - Change Operations ====================
+
+def create_change_request(db: Session, story_id: int, user_id: int, change_type: str, new_content: str, target_message_id: int = None) -> Optional[object]:
+    """Propose a change (new message, edit, refine)."""
+    from app.db.models import StoryChangeRequest
+    try:
+        request = StoryChangeRequest(
+            story_id=story_id,
+            user_id=user_id,
+            change_type=change_type,
+            new_content=new_content,
+            target_message_id=target_message_id,
+            status='pending'
+        )
+        db.add(request)
+        db.commit()
+        db.refresh(request)
+        return request
+    except Exception as e:
+        logger.error(f"Error creating change request: {e}")
+        db.rollback()
+        return None
+
+def get_change_requests(db: Session, story_id: int) -> List[object]:
+    """Get pending change requests for a story."""
+    from app.db.models import StoryChangeRequest
+    try:
+        return db.query(StoryChangeRequest).filter(
+            StoryChangeRequest.story_id == story_id,
+            StoryChangeRequest.status == 'pending'
+        ).all()
+    except Exception as e:
+        logger.error(f"Error getting change requests: {e}")
+        return []
+
+def update_change_request_status(db: Session, request_id: int, status: str) -> Optional[object]:
+    """Update change request status. If approved, caller must apply change manually."""
+    from app.db.models import StoryChangeRequest
+    try:
+        request = db.query(StoryChangeRequest).filter(StoryChangeRequest.id == request_id).first()
+        if request:
+            request.status = status
+            db.commit()
+            db.refresh(request)
+        return request
+    except Exception as e:
+        logger.error(f"Error updating change request: {e}")
+        return None
+
+def remove_story_access(db: Session, story_id: int, user_id: int) -> bool:
+    """Remove a user's access to a story (member or pending)."""
+    from app.db.models import StoryAccess
+    try:
+        access = db.query(StoryAccess).filter(
+            StoryAccess.story_id == story_id,
+            StoryAccess.user_id == user_id
+        ).first()
+        
+        if access:
+            db.delete(access)
+            db.commit()
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error removing story access: {e}")
+        db.rollback()
+        return False
