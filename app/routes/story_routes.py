@@ -1,19 +1,19 @@
-import logging
 import json
+import logging
+from datetime import datetime
 from typing import List, Optional
-from fastapi import APIRouter, HTTPException, Depends
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
-
-from app.db.connection import get_db
 from app.db import crud
 from app.db.models import User
-from app.ai.hints import generate_story_with_context, refine_single_segment, generate_continuation
 from app.routes.auth_routes import get_current_user
-
-logger = logging.getLogger(__name__)
+from app.db.connection import get_db
+from app.ai.hints import generate_story_with_context, generate_continuation, refine_single_segment
+from app.utils.llm_client import generate_summary, compute_nsi
 
 router = APIRouter(prefix="/api", tags=["Story Chat"])
+logger = logging.getLogger(__name__)
 
 
 # ==================== Request/Response Models ====================
@@ -29,8 +29,8 @@ class StoryOut(BaseModel):
     hash_id: str
     story_name: str
     genre: Optional[str]
-    created_at: str
-    updated_at: str
+    created_at: Optional[datetime]
+    updated_at: Optional[datetime]
     message_count: int = 0
     first_prompt: Optional[str] = None
     access_level: Optional[str] = None
@@ -45,7 +45,8 @@ class MessageOut(BaseModel):
     user_prompt: str
     ai_response: str
     hint_context: Optional[str]
-    created_at: str
+    stability_score: Optional[int] = None
+    created_at: datetime
 
     class Config:
         from_attributes = True
@@ -61,6 +62,7 @@ class GenerateResponse(BaseModel):
     message_id: int
     ai_response: str
     hint: str
+    stability_score: Optional[int] = None
     request_id: Optional[int] = None
 
 class RefineRequest(BaseModel):
@@ -84,6 +86,7 @@ class ContinueResponse(BaseModel):
     message_id: int
     ai_response: str
     hint: str
+    stability_score: Optional[int] = None
     request_id: Optional[int] = None
 
 
@@ -192,8 +195,8 @@ def create_story(
         hash_id=story.hash_id,
         story_name=story.story_name,
         genre=story.genre,
-        created_at=story.created_at.isoformat(),
-        updated_at=story.updated_at.isoformat(),
+        created_at=story.created_at,
+        updated_at=story.updated_at,
         message_count=0,
         access_level="owner"
     )
@@ -221,8 +224,8 @@ def get_stories(
             hash_id=story.hash_id,
             story_name=story.story_name,
             genre=story.genre,
-            created_at=story.created_at.isoformat(),
-            updated_at=story.updated_at.isoformat(),
+            created_at=story.created_at,
+            updated_at=story.updated_at,
             message_count=len(messages),
             first_prompt=first_prompt,
             access_level=crud.check_user_access(db, story.id, current_user.id)
@@ -259,8 +262,8 @@ def get_story(
         hash_id=story.hash_id,
         story_name=story.story_name,
         genre=story.genre,
-        created_at=story.created_at.isoformat(),
-        updated_at=story.updated_at.isoformat(),
+        created_at=story.created_at,
+        updated_at=story.updated_at,
         message_count=len(messages),
         first_prompt=first_prompt,
         access_level=access_type
@@ -295,8 +298,8 @@ def get_story_by_hash(
         hash_id=story.hash_id,
         story_name=story.story_name,
         genre=story.genre,
-        created_at=story.created_at.isoformat(),
-        updated_at=story.updated_at.isoformat(),
+        created_at=story.created_at,
+        updated_at=story.updated_at,
         message_count=len(messages),
         first_prompt=first_prompt
     )
@@ -383,7 +386,8 @@ def get_messages(
             user_prompt=m.user_prompt,
             ai_response=m.ai_response,
             hint_context=m.hint_context,
-            created_at=m.created_at.isoformat()
+            stability_score=m.stability_score,
+            created_at=m.created_at
         )
         for m in messages
     ]
@@ -442,6 +446,32 @@ def edit_message(
     }
 
 
+def trigger_periodic_summary(db: Session, story_id: int):
+    """
+    Check if a new summary should be generated (e.g., every 5 messages).
+    """
+    try:
+        messages = crud.get_messages(db, story_id)
+        msg_count = len(messages)
+        
+        # Every 5 messages, update the summary
+        if msg_count > 0 and msg_count % 5 == 0:
+            logger.info(f"Triggering periodic summarization for story {story_id} (count: {msg_count})")
+            current_summary = crud.get_story_summary(db, story_id)
+            
+            # Use last 10 messages for the 'recent events' to update the summary
+            recent_context = []
+            for m in messages[-10:]:
+                recent_context.append({"role": "user", "content": m.user_prompt})
+                recent_context.append({"role": "assistant", "content": m.ai_response})
+            
+            new_summary = generate_summary(recent_context, current_summary)
+            crud.update_story_summary(db, story_id, new_summary)
+            logger.info(f"Summary updated for story {story_id}")
+    except Exception as e:
+        logger.error(f"Error in periodic summarization: {e}")
+
+
 @router.post("/generate", response_model=GenerateResponse)
 def generate_story_message(
     request: GenerateRequest,
@@ -465,28 +495,48 @@ def generate_story_message(
     if access_type not in ['owner', 'collaborate']:
         raise HTTPException(status_code=403, detail="Not authorized to generate content for this story")
     
-    # Get existing messages and their hints for context
+    # Fetch story context
+    story_summary = crud.get_story_summary(db, request.story_id)
+    story_world_rules = crud.get_world_rules(db, request.story_id)
     existing_messages = crud.get_messages(db, request.story_id)
     previous_hints = [m.hint_context for m in existing_messages if m.hint_context]
+    
+    # Fetch previous NSI for adaptive injection
+    last_message = existing_messages[-1] if existing_messages else None
+    previous_nsi = last_message.stability_score if last_message and last_message.stability_score is not None else 100
+    
+    # Build SLIDING WINDOW chat history (Last 10 messages)
+    history = []
+    recent_messages = existing_messages[-10:]
+    for m in recent_messages:
+        history.append({"role": "user", "content": m.user_prompt})
+        history.append({"role": "assistant", "content": m.ai_response})
     
     # Determine genre
     genre = request.genre or story.genre or ""
     
     try:
         if len(existing_messages) == 0:
-            # First message - generate initial story
-            ai_response, new_hint = generate_story_with_context(
+            # First message
+            ai_response, new_hint, violations, updated_rules = generate_story_with_context(
                 user_prompt=request.prompt,
                 genre=genre,
+                history=None,
+                summary=None,
                 previous_hints=None,
-                previous_content_summary=None
+                previous_nsi=previous_nsi,
+                world_rules=story_world_rules
             )
         else:
-            # Continuation - use hints to avoid repetition
-            ai_response, new_hint = generate_continuation(
+            # Continuation - pass history window, summary, and hints
+            ai_response, new_hint, violations, updated_rules = generate_continuation(
                 user_prompt=request.prompt,
                 genre=genre,
-                all_previous_hints=previous_hints
+                history=history,
+                summary=story_summary,
+                all_previous_hints=previous_hints,
+                previous_nsi=previous_nsi,
+                world_rules=story_world_rules
             )
         
         if access_type == 'collaborate':
@@ -513,13 +563,21 @@ def generate_story_message(
                 request_id=change_req.id
             )
 
+        # Compute deterministic NSI from violation counts
+        stability_score = compute_nsi(violations)
+
+        # Persist updated world rules
+        if updated_rules:
+            crud.update_world_rules(db, request.story_id, updated_rules)
+
         # Save the message for owners
         message = crud.create_message(
             db,
             story_id=request.story_id,
             user_prompt=request.prompt,
             ai_response=ai_response,
-            hint_context=new_hint
+            hint_context=new_hint,
+            stability_score=stability_score
         )
         
         if not message:
@@ -529,10 +587,14 @@ def generate_story_message(
         if new_hint:
             crud.create_hint(db, request.story_id, new_hint, message.id)
         
+        # Trigger periodic summarization
+        trigger_periodic_summary(db, request.story_id)
+        
         return GenerateResponse(
             message_id=message.id,
             ai_response=ai_response,
-            hint=new_hint or ""
+            hint=new_hint or "",
+            stability_score=stability_score
         )
         
     except Exception as e:
@@ -561,17 +623,34 @@ def refine_message(
     if access_type not in ['owner', 'collaborate']:
         raise HTTPException(status_code=403, detail="Not authorized to refine this story")
 
-    # Get hints from messages BEFORE this one for context
+    # Build context for refinement
     story_id = message.story_id
+    story_summary = crud.get_story_summary(db, story_id)
+    story_world_rules = crud.get_world_rules(db, story_id)
     previous_messages = crud.get_previous_messages(db, story_id, message.order_index)
     previous_hints = [m.hint_context for m in previous_messages if m.hint_context]
     
+    # Fetch previous NSI for adaptive injection
+    last_prev = previous_messages[-1] if previous_messages else None
+    previous_nsi = last_prev.stability_score if last_prev and last_prev.stability_score is not None else 100
+    
+    # Build SLIDING WINDOW context window (Last 10 messages before this one)
+    history = []
+    recent_prev = previous_messages[-10:]
+    for m in recent_prev:
+        history.append({"role": "user", "content": m.user_prompt})
+        history.append({"role": "assistant", "content": m.ai_response})
+    
     try:
-        # Refine only this segment
-        refined_text, new_hint = refine_single_segment(
+        # Refine with hybrid memory context
+        refined_text, new_hint, _violations, updated_rules = refine_single_segment(
             original_text=message.ai_response,
             refine_prompt=request.refine_prompt,
-            previous_hints=previous_hints
+            history=history,
+            summary=story_summary,
+            previous_hints=previous_hints,
+            previous_nsi=previous_nsi,
+            world_rules=story_world_rules
         )
         
         if access_type == 'collaborate':
@@ -639,18 +718,36 @@ def continue_story(
     if access_type not in ['owner', 'collaborate']:
         raise HTTPException(status_code=403, detail="Not authorized to continue this story")
     
-    # Get all existing hints for context
+    # Fetch story context
+    story_summary = crud.get_story_summary(db, request.story_id)
+    story_world_rules = crud.get_world_rules(db, request.story_id)
     existing_messages = crud.get_messages(db, request.story_id)
     all_hints = [m.hint_context for m in existing_messages if m.hint_context]
+    
+    # Fetch previous NSI for adaptive injection
+    last_message = existing_messages[-1] if existing_messages else None
+    previous_nsi = last_message.stability_score if last_message and last_message.stability_score is not None else 100
+    
+    # Build SLIDING WINDOW chat history (Last 10 messages)
+    history = []
+    recent_messages = existing_messages[-10:]
+    for m in recent_messages:
+        history.append({"role": "user", "content": m.user_prompt})
+        history.append({"role": "assistant", "content": m.ai_response})
     
     if len(existing_messages) == 0:
         raise HTTPException(status_code=400, detail="Cannot continue - no messages yet. Use /generate first.")
     
     try:
-        ai_response, new_hint = generate_continuation(
+        # Generate continuation with hybrid memory (summary + hints + history window)
+        ai_response, new_hint, violations, updated_rules = generate_continuation(
             user_prompt=request.prompt,
             genre=story.genre or "",
-            all_previous_hints=all_hints
+            history=history,
+            summary=story_summary,
+            all_previous_hints=all_hints,
+            previous_nsi=previous_nsi,
+            world_rules=story_world_rules
         )
         
         if access_type == 'collaborate':
@@ -677,12 +774,20 @@ def continue_story(
                 request_id=change_req.id
             )
 
+        # Compute deterministic NSI from violation counts
+        stability_score = compute_nsi(violations)
+
+        # Persist updated world rules
+        if updated_rules:
+            crud.update_world_rules(db, request.story_id, updated_rules)
+
         message = crud.create_message(
             db,
             story_id=request.story_id,
             user_prompt=request.prompt,
             ai_response=ai_response,
-            hint_context=new_hint
+            hint_context=new_hint,
+            stability_score=stability_score
         )
         
         if not message:
@@ -691,10 +796,14 @@ def continue_story(
         if new_hint:
             crud.create_hint(db, request.story_id, new_hint, message.id)
         
+        # Trigger periodic summarization
+        trigger_periodic_summary(db, request.story_id)
+        
         return ContinueResponse(
             message_id=message.id,
             ai_response=ai_response,
-            hint=new_hint or ""
+            hint=new_hint or "",
+            stability_score=stability_score
         )
         
     except Exception as e:
@@ -796,6 +905,11 @@ def create_message_review(
     if not request.comment.strip():
         raise HTTPException(status_code=400, detail="Comment cannot be empty")
     
+    # Verify message exists first
+    message = crud.get_message(db, message_id)
+    if not message:
+        raise HTTPException(status_code=404, detail="Message not found")
+        
     # Check access
     access_type = crud.check_user_access(db, message.story_id, current_user.id)
     if access_type not in ['owner', 'collaborate']:
@@ -1066,6 +1180,8 @@ def update_change_request(
                     content_data.get('ai_response', ''),
                     content_data.get('hint_context', '')
                 )
+                # Trigger periodic summarization after approval
+                trigger_periodic_summary(db, story.id)
             except:
                  # Fallback if text
                  pass

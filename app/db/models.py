@@ -34,6 +34,8 @@ class Story(Base):
     story_name = Column(String(255), nullable=False)
     description = Column(Text, nullable=True)
     genre = Column(String(100), nullable=True)
+    summary = Column(LONGTEXT, nullable=True)  # Rolling summary of the story context
+    world_rules = Column(LONGTEXT, nullable=True)  # Persisted world rule set from WRLD block
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -54,6 +56,7 @@ class StoryMessage(Base):
     user_prompt = Column(Text, nullable=False)
     ai_response = Column(LONGTEXT, nullable=False)
     hint_context = Column(Text, nullable=True)  # 5-10 word context hint for this segment
+    stability_score = Column(Integer, nullable=True)  # Narrative Stability Index (0-100)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

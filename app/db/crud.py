@@ -101,22 +101,76 @@ def delete_story(db: Session, story_id: int) -> bool:
         return False
 
 
+def update_story_summary(db: Session, story_id: int, summary: str) -> bool:
+    """Update the rolling summary for a story."""
+    try:
+        story = db.query(Story).filter(Story.id == story_id).first()
+        if story:
+            story.summary = summary
+            db.commit()
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error updating story summary: {e}")
+        db.rollback()
+        return False
+
+
+def get_story_summary(db: Session, story_id: int) -> Optional[str]:
+    """Get the rolling summary for a story."""
+    try:
+        story = db.query(Story).filter(Story.id == story_id).first()
+        return story.summary if story else None
+    except Exception as e:
+        logger.error(f"Error getting story summary: {e}")
+        return None
+
+
+def update_world_rules(db: Session, story_id: int, world_rules: str) -> bool:
+    """Update the persisted world rules for a story."""
+    try:
+        story = db.query(Story).filter(Story.id == story_id).first()
+        if story:
+            story.world_rules = world_rules
+            db.commit()
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Error updating world rules: {e}")
+        db.rollback()
+        return False
+
+
+def get_world_rules(db: Session, story_id: int) -> Optional[str]:
+    """Get the persisted world rules for a story."""
+    try:
+        story = db.query(Story).filter(Story.id == story_id).first()
+        return story.world_rules if story else None
+    except Exception as e:
+        logger.error(f"Error getting world rules: {e}")
+        return None
+
+
 # ==================== Message Operations ====================
 
-def create_message(db: Session, story_id: int, user_prompt: str, ai_response: str, hint_context: str = None) -> Optional[StoryMessage]:
+def create_message(db: Session, story_id: int, user_prompt: str, ai_response: str, hint_context: str = None, stability_score: int = None) -> Optional[StoryMessage]:
     """Create a new message in a story."""
     try:
-        # Get next order index
-        max_order = db.query(StoryMessage).filter(
+        # Get next order index using max() to handle deletions safely
+        from sqlalchemy import func
+        max_order = db.query(func.max(StoryMessage.order_index)).filter(
             StoryMessage.story_id == story_id
-        ).count()
+        ).scalar()
+        
+        next_order = (max_order + 1) if max_order is not None else 0
         
         message = StoryMessage(
             story_id=story_id,
-            order_index=max_order,
+            order_index=next_order,
             user_prompt=user_prompt,
             ai_response=ai_response,
-            hint_context=hint_context
+            hint_context=hint_context,
+            stability_score=stability_score
         )
         db.add(message)
         
